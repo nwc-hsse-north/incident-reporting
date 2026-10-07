@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>مسح تصاريح الدخول — الأمن الصناعي</title>
+<style>
+:root{--teal:#00707e;--teal2:#00919f;--teal3:#e6f3f4;--gold:#c8a13d;
+ --green:#0ca30c;--red:#d03b3b;--gray:#6b7c86}
+*{box-sizing:border-box}
+body{margin:0;background:#0d2a2f;color:#fff;font-family:"Sakkal Majalla","Segoe UI",Tahoma,sans-serif;
+ font-size:18px;line-height:1.7;min-height:100vh;display:flex;flex-direction:column}
+header{background:linear-gradient(135deg,var(--teal),var(--teal2));padding:14px;text-align:center}
+header h1{margin:0;font-size:1.16rem;font-weight:800}
+header p{margin:3px 0 0;font-size:.82rem;opacity:.9}
+main{flex:1;max-width:620px;width:100%;margin:0 auto;padding:16px}
+.stage{position:relative;width:100%;aspect-ratio:1/1;background:#06181c;border-radius:16px;
+ overflow:hidden;border:1px solid #1d4248}
+video{width:100%;height:100%;object-fit:cover;display:block}
+.frame{position:absolute;inset:14%;border:3px solid rgba(255,255,255,.85);border-radius:14px;
+ box-shadow:0 0 0 100vmax rgba(0,0,0,.35);pointer-events:none}
+.frame::after{content:"";position:absolute;left:0;right:0;height:2px;background:var(--gold);
+ animation:sweep 2.1s ease-in-out infinite}
+@keyframes sweep{0%,100%{top:4%}50%{top:94%}}
+.idle{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;
+ justify-content:center;gap:12px;text-align:center;padding:22px;color:#9fc0c5}
+.idle b{font-size:2.6rem}
+.btn{display:block;width:100%;padding:15px;border:0;border-radius:12px;background:var(--teal2);
+ color:#fff;font-family:inherit;font-size:1.05rem;font-weight:800;cursor:pointer;margin-top:14px}
+.btn:active{background:var(--teal)}
+.btn.ghost{background:transparent;border:1px solid #2d5b62;color:#bcd9dd;font-weight:700}
+.msg{margin-top:14px;padding:12px 14px;border-radius:11px;font-size:.92rem;display:none}
+.msg.err{background:#3a1512;border:1px solid #7d2a22;color:#ffc7bf;display:block}
+.msg.ok{background:#0f2f14;border:1px solid #1f6b26;color:#b9f0bf;display:block}
+.manual{margin-top:18px;background:#102f35;border:1px solid #1d4248;border-radius:12px;padding:14px}
+.manual label{display:block;font-size:.84rem;color:#9fc0c5;font-weight:700;margin-bottom:6px}
+.manual input{width:100%;padding:12px;border:1px solid #2d5b62;border-radius:10px;background:#061c20;
+ color:#fff;font-family:inherit;font-size:1rem}
+.note{color:#7fa3a9;font-size:.8rem;text-align:center;padding:14px}
+</style>
+</head>
+<body>
+<header>
+ <h1>مسح تصاريح الدخول</h1>
+ <p>الإدارة العامة للسلامة والأمن الصناعي — القطاع الشمالي</p>
+</header>
+
+<main>
+ <div class="stage">
+  <video id="v" playsinline muted></video>
+  <div class="frame" id="frame" style="display:none"></div>
+  <div class="idle" id="idle"><b>📷</b><span>اضغط «بدء المسح» ووجّه الكاميرا<br>إلى رمز QR على التصريح</span></div>
+ </div>
+
+ <button class="btn" id="go">▶ بدء المسح</button>
+ <button class="btn ghost" id="stop" style="display:none">■ إيقاف</button>
+ <div class="msg" id="msg"></div>
+
+ <div class="manual">
+  <label>أو اكتب رقم التصريح يدويًا</label>
+  <input id="pno" dir="ltr" placeholder="QSM-P-2026-0001" enterkeyhint="go">
+  <button class="btn ghost" id="openBtn" style="margin-top:10px">فتح بيانات التصريح</button>
+ </div>
+</main>
+
+<p class="note">تُفتح البيانات في صفحة التحقق بعد تسجيل الدخول — هذه الصفحة للمسح فقط ولا تحفظ شيئًا.</p>
+
+<canvas id="cv" hidden></canvas>
+<script>
+/* ======== اضبط هذا السطر فقط: رابط صفحة التحقق المنتهي بـ /exec ======== */
+var TARGET = 'https://script.google.com/macros/s/ضع_رابط_النشر_هنا/exec';
+/* ===================================================================== */
+
+var v=document.getElementById('v'), cv=document.getElementById('cv'), ctx=cv.getContext('2d',{willReadFrequently:true});
+var msg=document.getElementById('msg'), stream=null, running=false, detector=null, jsqrReady=false;
+
+function say(t,cls){ msg.className='msg '+(cls||''); msg.textContent=t||''; }
+function show(id,on){ document.getElementById(id).style.display = on?'block':'none'; }
+
+/** يستخرج رقم التصريح من نص الرمز: رابط فيه p= أو رقم مباشر */
+function permitFrom(text){
+  if(!text) return '';
+  text=String(text).trim();
+  var m=text.match(/[?&]p=([^&#\s]+)/);
+  if(m) return decodeURIComponent(m[1]);
+  if(/^[A-Z]{3}-[PV]-\d{4}-\d{3,}$/i.test(text)) return text;
+  return '';
+}
+
+function open_(no){
+  if(!no){ say('رمز غير معروف — ليس تصريحًا من النظام','err'); return; }
+  stopCam();
+  say('تم المسح: '+no+' — جارٍ الفتح…','ok');
+  location.href = TARGET + (TARGET.indexOf('?')<0?'?':'&') + 'p=' + encodeURIComponent(no);
+}
+
+async function loadJsQR(){
+  if(window.jsQR) return true;
+  var urls=['https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js',
+            'https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js'];
+  for(var i=0;i<urls.length;i++){
+    try{
+      await new Promise(function(res,rej){
+        var s=document.createElement('script'); s.src=urls[i];
+        s.onload=res; s.onerror=rej; document.head.appendChild(s);
+      });
+      if(window.jsQR) return true;
+    }catch(e){ /* جرّب المصدر التالي */ }
+  }
+  return false;
+}
+
+async function start(){
+  say('');
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    say('المتصفح لا يدعم الكاميرا — استخدم كاميرا الجوال لمسح الرمز','err'); return;
+  }
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{ facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:1280} }, audio:false });
+  }catch(e){
+    say('تعذّر فتح الكاميرا ('+e.name+') — تأكد من السماح بالكاميرا لهذا الموقع، أو استخدم كاميرا الجوال','err');
+    return;
+  }
+  v.srcObject=stream; await v.play();
+  show('idle',false); document.getElementById('frame').style.display='block';
+  document.getElementById('go').style.display='none';
+  document.getElementById('stop').style.display='block';
+  running=true;
+
+  if('BarcodeDetector' in window){
+    try{
+      var fmts = await window.BarcodeDetector.getSupportedFormats();
+      if(fmts.indexOf('qr_code')>=0) detector = new window.BarcodeDetector({formats:['qr_code']});
+    }catch(e){ detector=null; }
+  }
+  if(!detector){
+    jsqrReady = await loadJsQR();
+    if(!jsqrReady){ say('تعذّر تحميل أداة القراءة — تحقّق من الاتصال بالإنترنت','err'); }
+  }
+  tick();
+}
+
+async function tick(){
+  if(!running) return;
+  if(v.readyState === v.HAVE_ENOUGH_DATA){
+    try{
+      if(detector){
+        var codes = await detector.detect(v);
+        if(codes && codes.length){ return open_(permitFrom(codes[0].rawValue)); }
+      }else if(window.jsQR){
+        cv.width=v.videoWidth; cv.height=v.videoHeight;
+        ctx.drawImage(v,0,0,cv.width,cv.height);
+        var img=ctx.getImageData(0,0,cv.width,cv.height);
+        var r=window.jsQR(img.data,img.width,img.height,{inversionAttempts:'dontInvert'});
+        if(r && r.data){ return open_(permitFrom(r.data)); }
+      }
+    }catch(e){ /* إطار تالف — نواصل */ }
+  }
+  requestAnimationFrame(tick);
+}
+
+function stopCam(){
+  running=false;
+  if(stream){ stream.getTracks().forEach(function(t){ t.stop(); }); stream=null; }
+  v.srcObject=null;
+  show('idle',true); document.getElementById('frame').style.display='none';
+  document.getElementById('go').style.display='block';
+  document.getElementById('stop').style.display='none';
+}
+
+document.getElementById('go').addEventListener('click', start);
+document.getElementById('stop').addEventListener('click', function(){ stopCam(); say(''); });
+document.getElementById('openBtn').addEventListener('click', function(){
+  var n=document.getElementById('pno').value.trim();
+  if(n) open_(n); else say('اكتب رقم التصريح','err');
+});
+document.getElementById('pno').addEventListener('keydown', function(e){
+  if(e.key==='Enter'){ var n=e.target.value.trim(); if(n) open_(n); } });
+window.addEventListener('pagehide', stopCam);
+</script>
+</body>
+</html>
